@@ -6,7 +6,7 @@ pipeline {
 
         AWS_REGION = 'ap-south-1'
 
-        AWS_ACCOUNT_ID = credentials('376015725626')
+        AWS_ACCOUNT_ID = credentials('aws-ecr-credentials')
 
         ECR_REPOSITORY = 'seclock'
 
