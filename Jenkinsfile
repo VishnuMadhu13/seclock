@@ -3,22 +3,48 @@ pipeline {
 
     environment {
         AWS_REGION = 'ap-south-1'
-        AWS_ACCOUNT_ID = credentials('aws-ecr-credentials')
-        ECR_REPO_URI = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/seclock"
-        IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.take(7)}"
+        ECR_REPO_URI = '376015725626.dkr.ecr.ap-south-1.amazonaws.com/seclock'
         EKS_CLUSTER_NAME = 'seclock-cluster'
         K8S_NAMESPACE = 'seclock-prod'
     }
 
     stages {
+
         stage('1. Checkout & Secrets Scan') {
             steps {
                 checkout scm
-                sh 'docker run --rm -v ${WORKSPACE}:/path zricethezav/gitleaks:latest detect --source /path --redact -v || true'
+
+                sh '''
+                    set -e
+
+                    docker run --rm \
+                        -v "$WORKSPACE:/path" \
+                        zricethezav/gitleaks:latest \
+                        detect \
+                        --source /path \
+                        --redact \
+                        -v
+                '''
             }
         }
 
-        stage('2. SCA & SAST') {
+        stage('2. Set Image Tag') {
+            steps {
+                script {
+                    def shortCommit = sh(
+                        script: 'git rev-parse --short=7 HEAD',
+                        returnStdout: true
+                    ).trim()
+
+                    env.IMAGE_TAG = "${env.BUILD_NUMBER}-${shortCommit}"
+                    env.FULL_IMAGE_URI = "${env.ECR_REPO_URI}:${env.IMAGE_TAG}"
+
+                    echo "Image: ${env.FULL_IMAGE_URI}"
+                }
+            }
+        }
+
+        stage('3. SCA & SAST') {
             steps {
                 sh '''
                     set -e
@@ -39,67 +65,101 @@ pipeline {
                         --severity-level medium \
                         --confidence-level high
                 '''
-            
+            }
         }
 
-        stage('3. Unit & E2E Testing') {
+        stage('4. Unit & E2E Testing') {
             steps {
-                sh '''#!/bin/bash
+                sh '''
                     set -e
 
                     venv/bin/pip install pytest
-
                     venv/bin/pytest
                 '''
             }
         }
 
-        stage('4. Build Docker Image') {
+        stage('5. Build Docker Image') {
             steps {
                 script {
-                    docker.build("${ECR_REPO_URI}:${IMAGE_TAG}", ".")
+                    docker.build("${env.FULL_IMAGE_URI}", ".")
                 }
             }
         }
 
-        stage('5. Container Security Scan (Trivy)') {
+        stage('6. Container Security Scan (Trivy)') {
             steps {
-                // Mount the workspace (-v ${WORKSPACE}:/workspace) so Trivy can read .trivyignore
-                sh """#!/bin/bash
-                    docker run --rm \\
-                        -v /var/run/docker.sock:/var/run/docker.sock \\
-                        -v \${WORKSPACE}:/workspace \\
-                        -w /workspace \\
-                        aquasec/trivy image --exit-code 1 --ignorefile .trivyignore --severity CRITICAL \${ECR_REPO_URI}:\${IMAGE_TAG}
-                """
+                sh '''
+                    set -e
+
+                    docker run --rm \
+                        -v /var/run/docker.sock:/var/run/docker.sock \
+                        -v "$WORKSPACE:/workspace" \
+                        -w /workspace \
+                        aquasec/trivy:latest \
+                        image \
+                        --exit-code 1 \
+                        --severity CRITICAL \
+                        --ignorefile .trivyignore \
+                        "$FULL_IMAGE_URI"
+                '''
             }
         }
 
-        stage('6. AWS ECR Login & Push') {
+        stage('7. AWS ECR Login & Push') {
             steps {
-                script {
-                    sh '''#!/bin/bash
-                        aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
-                    '''
-                    docker.image("${ECR_REPO_URI}:${IMAGE_TAG}").push()
-                    docker.image("${ECR_REPO_URI}:${IMAGE_TAG}").push("latest")
-                }
+                sh '''
+                    set -e
+
+                    ACCOUNT_ID=$(aws sts get-caller-identity \
+                        --query Account \
+                        --output text)
+
+                    aws ecr get-login-password \
+                        --region "$AWS_REGION" | \
+                        docker login \
+                        --username AWS \
+                        --password-stdin \
+                        "$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+
+                    docker push "$FULL_IMAGE_URI"
+
+                    docker tag "$FULL_IMAGE_URI" "$ECR_REPO_URI:latest"
+                    docker push "$ECR_REPO_URI:latest"
+                '''
             }
         }
 
-        stage('7. Deploy to Amazon EKS') {
+        stage('8. Deploy to Amazon EKS') {
             steps {
-                script {
-                    sh """#!/bin/bash
-                        aws eks update-kubeconfig --region ${AWS_REGION} --name ${EKS_CLUSTER_NAME}
-                        sed -i 's|<AWS_ACCOUNT_ID>.dkr.ecr.<AWS_REGION>.amazonaws.com/seclock:latest|${ECR_REPO_URI}:${IMAGE_TAG}|g' k8s/deployment.yaml
-                        kubectl create namespace ${K8S_NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
-                        kubectl apply -f k8s/serviceaccount.yaml
-                        kubectl apply -f k8s/deployment.yaml
-                        kubectl apply -f k8s/service.yaml
-                        kubectl rollout status deployment/seclock-deployment -n ${K8S_NAMESPACE} --timeout=120s
-                    """
-                }
+                sh '''
+                    set -e
+
+                    aws eks update-kubeconfig \
+                        --region "$AWS_REGION" \
+                        --name "$EKS_CLUSTER_NAME"
+
+                    sed -i "s|<AWS_ACCOUNT_ID>.dkr.ecr.<AWS_REGION>.amazonaws.com/seclock:latest|$FULL_IMAGE_URI|g" \
+                        k8s/deployment.yaml
+
+                    kubectl create namespace "$K8S_NAMESPACE" \
+                        --dry-run=client \
+                        -o yaml | kubectl apply -f -
+
+                    kubectl apply -f k8s/serviceaccount.yaml \
+                        -n "$K8S_NAMESPACE"
+
+                    kubectl apply -f k8s/deployment.yaml \
+                        -n "$K8S_NAMESPACE"
+
+                    kubectl apply -f k8s/service.yaml \
+                        -n "$K8S_NAMESPACE"
+
+                    kubectl rollout status \
+                        deployment/seclock-deployment \
+                        -n "$K8S_NAMESPACE" \
+                        --timeout=120s
+                '''
             }
         }
     }
@@ -109,8 +169,13 @@ pipeline {
             echo 'Cleaning up workspace...'
             deleteDir()
         }
+
+        success {
+            echo '✅ Pipeline completed successfully!'
+        }
+
         failure {
-            echo '🚨 Pipeline failed! Scroll up in the Console Output to find the actual error.'
+            echo '🚨 Pipeline failed! Check the console output.'
         }
     }
 }
