@@ -20,26 +20,30 @@ pipeline {
 
         stage('2. SCA & SAST') {
             steps {
-                sh '''#!/bin/bash
+                sh '''
+                    set -e
+
+                    rm -rf venv
                     python3 -m venv venv
-                    source venv/bin/activate
-                    pip install --upgrade pip
-                    pip install -r requirements.txt
-                    pip install pip-audit bandit
-                    
-                    pip-audit --format json > pip-audit-report.json || true
-                    bandit -r . -f json -o bandit-report.json || true
+
+                    venv/bin/python -m pip install --upgrade pip
+                    venv/bin/pip install -r requirements.txt
+                    venv/bin/pip install pip-audit bandit
+
+                    venv/bin/pip-audit
+                    venv/bin/bandit -r . -x ./venv
                 '''
-                archiveArtifacts artifacts: 'pip-audit-report.json, bandit-report.json', allowEmptyArchive: true
             }
         }
 
         stage('3. Unit & E2E Testing') {
             steps {
                 sh '''#!/bin/bash
-                    source venv/bin/activate
-                    pip install httpx
-                    python test_e2e.py
+                    set -e
+
+                    venv/bin/pip install pytest
+
+                    venv/bin/pytest
                 '''
             }
         }
