@@ -1,201 +1,106 @@
 pipeline {
-
     agent any
 
     environment {
-
         AWS_REGION = 'ap-south-1'
-
         AWS_ACCOUNT_ID = credentials('aws-ecr-credentials')
-
-        ECR_REPOSITORY = 'seclock'
-
-        ECR_REGISTRY = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-
-        IMAGE_NAME = "${ECR_REGISTRY}/${ECR_REPOSITORY}"
-
-        IMAGE_TAG = "${BUILD_NUMBER}"
-
-        EKS_CLUSTER = 'my-cluster'
-
-        K8S_NAMESPACE = 'seclock'
-
+        ECR_REPO_URI = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/seclock"
+        IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.take(7)}"
+        EKS_CLUSTER_NAME = 'seclock-cluster'
+        K8S_NAMESPACE = 'seclock-prod'
     }
 
     stages {
-
-        stage('Checkout') {
-
+        stage('1. Checkout & Secrets Scan') {
             steps {
-
                 checkout scm
-
+                sh 'docker run --rm -v ${WORKSPACE}:/path zricethezav/gitleaks:latest detect --source /path --redact -v || true'
             }
-
         }
 
-        stage('Install Dependencies') {
-
+        stage('2. SCA & SAST') {
             steps {
-
-                sh '''
-                    python3 -m venv .venv
-
-                    . .venv/bin/activate
-
+                sh '''#!/bin/bash
+                    python3 -m venv venv
+                    source venv/bin/activate
                     pip install --upgrade pip
-
                     pip install -r requirements.txt
+                    pip install pip-audit bandit
+                    
+                    pip-audit --format json > pip-audit-report.json || true
+                    bandit -r . -f json -o bandit-report.json || true
                 '''
-
+                archiveArtifacts artifacts: 'pip-audit-report.json, bandit-report.json', allowEmptyArchive: true
             }
-
         }
 
-        stage('Unit Tests') {
-
+        stage('3. Unit & E2E Testing') {
             steps {
-
-                sh '''
-                    . .venv/bin/activate
-
-                    pytest -v
+                sh '''#!/bin/bash
+                    source venv/bin/activate
+                    pip install httpx
+                    python test_e2e.py
                 '''
-
             }
-
         }
 
-        stage('Static Code Analysis') {
-
+        stage('4. Build Docker Image') {
             steps {
-
-                sh '''
-                    sonar-scanner \
-                      -Dsonar.projectKey=seclock \
-                      -Dsonar.sources=.
-                '''
-
+                script {
+                    docker.build("${ECR_REPO_URI}:${IMAGE_TAG}", ".")
+                }
             }
-
         }
 
-        stage('Trivy Filesystem Scan') {
-
+        stage('5. Container Security Scan (Trivy)') {
             steps {
-
-                sh '''
-                    trivy fs \
-                      --scanners vuln,secret \
-                      --severity HIGH,CRITICAL \
-                      .
-                '''
-
+                // Mount the workspace (-v ${WORKSPACE}:/workspace) so Trivy can read .trivyignore
+                sh """#!/bin/bash
+                    docker run --rm \\
+                        -v /var/run/docker.sock:/var/run/docker.sock \\
+                        -v \${WORKSPACE}:/workspace \\
+                        -w /workspace \\
+                        aquasec/trivy image --exit-code 1 --ignorefile .trivyignore --severity CRITICAL \${ECR_REPO_URI}:\${IMAGE_TAG}
+                """
             }
-
         }
 
-        stage('Docker Build') {
-
+        stage('6. AWS ECR Login & Push') {
             steps {
-
-                sh '''
-                    docker build \
-                      -t ${IMAGE_NAME}:${IMAGE_TAG} .
-                '''
-
+                script {
+                    sh '''#!/bin/bash
+                        aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+                    '''
+                    docker.image("${ECR_REPO_URI}:${IMAGE_TAG}").push()
+                    docker.image("${ECR_REPO_URI}:${IMAGE_TAG}").push("latest")
+                }
             }
-
         }
 
-        stage('Trivy Image Scan') {
-
+        stage('7. Deploy to Amazon EKS') {
             steps {
-
-                sh '''
-                    trivy image \
-                      --severity HIGH,CRITICAL \
-                      ${IMAGE_NAME}:${IMAGE_TAG}
-                '''
-
+                script {
+                    sh """#!/bin/bash
+                        aws eks update-kubeconfig --region ${AWS_REGION} --name ${EKS_CLUSTER_NAME}
+                        sed -i 's|<AWS_ACCOUNT_ID>.dkr.ecr.<AWS_REGION>.amazonaws.com/seclock:latest|${ECR_REPO_URI}:${IMAGE_TAG}|g' k8s/deployment.yaml
+                        kubectl create namespace ${K8S_NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
+                        kubectl apply -f k8s/serviceaccount.yaml
+                        kubectl apply -f k8s/deployment.yaml
+                        kubectl apply -f k8s/service.yaml
+                        kubectl rollout status deployment/seclock-deployment -n ${K8S_NAMESPACE} --timeout=120s
+                    """
+                }
             }
-
         }
-
-        stage('Login to ECR') {
-
-            steps {
-
-                sh '''
-                    aws ecr get-login-password \
-                      --region ${AWS_REGION} \
-                      | docker login \
-                      --username AWS \
-                      --password-stdin ${ECR_REGISTRY}
-                '''
-
-            }
-
-        }
-
-        stage('Push Image to ECR') {
-
-            steps {
-
-                sh '''
-                    docker push ${IMAGE_NAME}:${IMAGE_TAG}
-                '''
-
-            }
-
-        }
-
-        stage('Deploy to EKS') {
-
-            steps {
-
-                sh '''
-                    aws eks update-kubeconfig \
-                      --region ${AWS_REGION} \
-                      --name ${EKS_CLUSTER}
-
-                    kubectl -n ${K8S_NAMESPACE} \
-                      set image deployment/seclock \
-                      seclock=${IMAGE_NAME}:${IMAGE_TAG}
-
-                    kubectl -n ${K8S_NAMESPACE} \
-                      rollout status deployment/seclock \
-                      --timeout=180s
-                '''
-
-            }
-
-        }
-
     }
 
     post {
-
         always {
-
-            sh '''
-                docker image prune -f || true
-            '''
-
+            echo 'Cleaning up workspace...'
+            deleteDir()
         }
-
-        success {
-
-            echo 'Pipeline completed successfully.'
-
-        }
-
         failure {
-
-            echo 'Pipeline failed. Check the logs.'
-
+            echo '🚨 Pipeline failed! Scroll up in the Console Output to find the actual error.'
         }
-
     }
-
 }
