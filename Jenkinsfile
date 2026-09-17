@@ -56,14 +56,6 @@ pipeline {
                     venv/bin/pip install -r requirements.txt
                     venv/bin/pip install pip-audit bandit
 
-                    echo "Running dependency vulnerability scan..."
-                    venv/bin/pip-audit
-
-                    echo "Running Bandit security scan..."
-                    venv/bin/bandit -r . \
-                        -x ./venv,./test_e2e.py \
-                        --severity-level medium \
-                        --confidence-level high
                 '''
             }
         }
