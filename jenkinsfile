@@ -4,9 +4,9 @@ pipeline {
 
     environment {
 
-        AWS_REGION = 'us-east-1'
+        AWS_REGION = 'ap-south-1'
 
-        AWS_ACCOUNT_ID = credentials('aws-account-id')
+        AWS_ACCOUNT_ID = credentials('376015725626')
 
         ECR_REPOSITORY = 'seclock'
 
