@@ -88,7 +88,25 @@ pipeline {
         }
 
         stage('6. Container Security Scan (Trivy)') {
+            options { timeout(time: 15, unit: 'MINUTES') }
             steps {
+                // Download the vulnerability DB on its own, with retries
+                retry(3) {
+                    sh '''
+                        set -e
+                        mkdir -p "$JENKINS_HOME/.cache/trivy"
+
+                        docker run --rm \
+                        -v "$JENKINS_HOME/.cache/trivy":/root/.cache/ \
+                        aquasec/trivy:latest image \
+                        --download-db-only \
+                        --no-progress \
+                        --timeout 3m \
+                        --db-repository public.ecr.aws/aquasecurity/trivy-db:2,ghcr.io/aquasecurity/trivy-db:2,mirror.gcr.io/aquasec/trivy-db:2
+                    '''
+                }
+
+                // Scan using the cached DB only
                 sh '''
                     set -e
                     test -n "$IMAGE" || { echo "IMAGE is empty"; exit 1; }
@@ -99,6 +117,7 @@ pipeline {
                         aquasec/trivy:latest image \
                         --no-progress \
                         --scanners vuln \
+                        --skip-db-update \
                         --exit-code 1 \
                         --severity CRITICAL \
                         "$IMAGE"
