@@ -170,12 +170,16 @@ pipeline {
                             --region "$AWS_REGION" \
                             --name "$EKS_CLUSTER_NAME"
 
-                        sed -i "s|376015725626.dkr.ecr.ap-south-1.amazonaws.com/seclock:latest|$IMAGE|g" \
-                            k8s/deployment.yaml
+                        echo "Image line(s) before update:"
+                        grep -n "image:" k8s/deployment.yaml
 
-                        # Fail if the placeholder wasn't replaced, otherwise the wrong image would be deployed
-                        grep -q "$IMAGE" k8s/deployment.yaml || {
-                            echo "Image placeholder not found in k8s/deployment.yaml"
+                        sed -i -E "s|image:[[:space:]]*.*seclock.*|image: ${IMAGE}|" k8s/deployment.yaml
+
+                        echo "Image line(s) after update:"
+                        grep -n "image:" k8s/deployment.yaml
+
+                        grep -q "image: ${IMAGE}" k8s/deployment.yaml || {
+                            echo "No seclock image line found in k8s/deployment.yaml"
                             exit 1
                         }
 
