@@ -23,7 +23,7 @@ spec:
           image: SEClock_IMAGE
 
           ports:
-            - containerPort: 8000
+            - containerPort: 8080
 
           resources:
             requests:
