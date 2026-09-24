@@ -3,7 +3,6 @@ kind: Service
 
 metadata:
   name: seclock-service
-  namespace: seclock
 
 spec:
   type: LoadBalancer
