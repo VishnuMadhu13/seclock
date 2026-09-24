@@ -185,12 +185,12 @@ pipeline {
                             --dry-run=client \
                             -o yaml | kubectl apply -f -
 
-                        kubectl apply -f k8s/serviceaccount.yaml -n "$K8S_NAMESPACE"
+                        #kubectl apply -f k8s/serviceaccount.yaml -n "$K8S_NAMESPACE"
                         kubectl apply -f k8s/deployment.yaml -n "$K8S_NAMESPACE"
                         kubectl apply -f k8s/service.yaml -n "$K8S_NAMESPACE"
 
                         kubectl rollout status \
-                            deployment/seclock-deployment \
+                            deployment/seclock \
                             -n "$K8S_NAMESPACE" \
                             --timeout=120s
                     '''
