@@ -92,7 +92,6 @@ pipeline {
                         image \
                         --exit-code 1 \
                         --severity CRITICAL \
-                        --ignorefile .trivyignore \
                         "$FULL_IMAGE_URI"
                 '''
             }
