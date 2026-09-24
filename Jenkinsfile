@@ -31,15 +31,9 @@ pipeline {
         stage('2. Set Image Tag') {
             steps {
                 script {
-                    def shortCommit = sh(
-                        script: 'git rev-parse --short=7 HEAD',
-                        returnStdout: true
-                    ).trim()
-
-                    env.IMAGE_TAG = "${env.BUILD_NUMBER}-${shortCommit}"
-                    env.FULL_IMAGE_URI = "${env.ECR_REPO_URI}:${env.IMAGE_TAG}"
-
-                    echo "Image: ${env.FULL_IMAGE_URI}"
+                    def commit = sh(script: 'git rev-parse --short=7 HEAD', returnStdout: true).trim()
+                    env.IMAGE = "376015725626.dkr.ecr.ap-south-1.amazonaws.com/seclock:${env.BUILD_NUMBER}-${commit}"
+                    echo "Image: ${env.IMAGE}"
                 }
             }
         }
@@ -73,7 +67,7 @@ pipeline {
 
         stage('5. Build Docker Image') {
             steps {
-                sh "docker build --pull -t ${IMAGE} ."
+                sh 'docker build --pull -t ${IMAGE} .'
             }
         }
 
