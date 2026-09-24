@@ -155,6 +155,7 @@ pipeline {
             }
         }
 
+        
         stage('8. Deploy to Amazon EKS') {
             steps {
                 withCredentials([usernamePassword(
@@ -170,18 +171,15 @@ pipeline {
                             --region "$AWS_REGION" \
                             --name "$EKS_CLUSTER_NAME"
 
-                        echo "Image line(s) before update:"
-                        grep -n "image:" k8s/deployment.yaml
+                        # Replace the image placeholder in the manifest
+                        sed -i "s|SEClock_IMAGE|$IMAGE|g" k8s/deployment.yaml
 
-                        sed -i -E "s|image:[[:space:]]*.*seclock.*|image: ${IMAGE}|" k8s/deployment.yaml
-
-                        echo "Image line(s) after update:"
-                        grep -n "image:" k8s/deployment.yaml
-
-                        grep -q "image: ${IMAGE}" k8s/deployment.yaml || {
-                            echo "No seclock image line found in k8s/deployment.yaml"
+                        # Fail if the image line isn't what we expect
+                        grep -qF "image: $IMAGE" k8s/deployment.yaml || {
+                            echo "Image placeholder SEClock_IMAGE not found in k8s/deployment.yaml"
                             exit 1
                         }
+                        grep -n "image:" k8s/deployment.yaml
 
                         kubectl create namespace "$K8S_NAMESPACE" \
                             --dry-run=client \
@@ -199,7 +197,7 @@ pipeline {
                 }
             }
         }
-    }
+             
 
     post {
         always {
