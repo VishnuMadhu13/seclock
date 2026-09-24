@@ -75,16 +75,11 @@ pipeline {
             steps {
                 sh '''
                     set -e
-
+                    test -n "$IMAGE" || { echo "IMAGE is empty"; exit 1; }
                     docker run --rm \
-                        -v /var/run/docker.sock:/var/run/docker.sock \
-                        -v "$WORKSPACE:/workspace" \
-                        -w /workspace \
-                        aquasec/trivy:latest \
-                        image \
-                        --exit-code 1 \
-                        --severity CRITICAL \
-                        "$FULL_IMAGE_URI"
+                    -v /var/run/docker.sock:/var/run/docker.sock \
+                    -v "$WORKSPACE":/workspace -w /workspace \
+                    aquasec/trivy:latest image --exit-code 1 --severity CRITICAL "$IMAGE"
                 '''
             }
         }
