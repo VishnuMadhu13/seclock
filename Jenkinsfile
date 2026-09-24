@@ -1,11 +1,18 @@
 pipeline {
     agent any
 
+    options {
+        timeout(time: 30, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+    }
+
     environment {
-        AWS_REGION = 'ap-south-1'
-        ECR_REPO_URI = '376015725626.dkr.ecr.ap-south-1.amazonaws.com/seclock'
+        AWS_REGION       = 'ap-south-1'
+        ECR_REPO_URI     = '376015725626.dkr.ecr.ap-south-1.amazonaws.com/seclock'
         EKS_CLUSTER_NAME = 'seclock-cluster'
-        K8S_NAMESPACE = 'seclock-prod'
+        K8S_NAMESPACE    = 'seclock-prod'
+        AWS_CRED_ID      = 'aws-ecr-credentials'   // Jenkins credential ID (Username with password)
     }
 
     stages {
@@ -32,7 +39,7 @@ pipeline {
             steps {
                 script {
                     def commit = sh(script: 'git rev-parse --short=7 HEAD', returnStdout: true).trim()
-                    env.IMAGE = "376015725626.dkr.ecr.ap-south-1.amazonaws.com/seclock:${env.BUILD_NUMBER}-${commit}"
+                    env.IMAGE = "${ECR_REPO_URI}:${env.BUILD_NUMBER}-${commit}"
                     echo "Image: ${env.IMAGE}"
                 }
             }
@@ -50,6 +57,11 @@ pipeline {
                     venv/bin/pip install -r requirements.txt
                     venv/bin/pip install pip-audit bandit
 
+                    # SCA: fail on known vulnerabilities in dependencies
+                    venv/bin/pip-audit -r requirements.txt
+
+                    # SAST: fail on medium+ severity findings (-ll), skip venv and tests
+                    venv/bin/bandit -r . -ll -x ./venv,./test_e2e.py
                 '''
             }
         }
@@ -59,15 +71,19 @@ pipeline {
                 sh '''
                     set -e
 
-                    venv/bin/pip install pytest
-                    venv/bin/pytest
+                    venv/bin/pip install pytest httpx2
+                    venv/bin/pytest -v
                 '''
             }
         }
 
         stage('5. Build Docker Image') {
             steps {
-                sh 'docker build --pull -t ${IMAGE} .'
+                sh '''
+                    set -e
+                    test -n "$IMAGE" || { echo "IMAGE is empty"; exit 1; }
+                    docker build --pull -t "$IMAGE" .
+                '''
             }
         }
 
@@ -76,68 +92,88 @@ pipeline {
                 sh '''
                     set -e
                     test -n "$IMAGE" || { echo "IMAGE is empty"; exit 1; }
+
                     docker run --rm \
-                    -v /var/run/docker.sock:/var/run/docker.sock \
-                    -v "$WORKSPACE":/workspace -w /workspace \
-                    aquasec/trivy:latest image --exit-code 1 --severity CRITICAL "$IMAGE"
+                        -v /var/run/docker.sock:/var/run/docker.sock \
+                        -v "$JENKINS_HOME/.cache/trivy":/root/.cache/ \
+                        aquasec/trivy:latest image \
+                        --no-progress \
+                        --scanners vuln \
+                        --exit-code 1 \
+                        --severity CRITICAL \
+                        "$IMAGE"
                 '''
             }
         }
 
         stage('7. AWS ECR Login & Push') {
             steps {
-                sh '''
-                    set -e
+                withCredentials([usernamePassword(
+                    credentialsId: "${AWS_CRED_ID}",
+                    usernameVariable: 'AWS_ACCESS_KEY_ID',
+                    passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                )]) {
+                    sh '''
+                        set -e
+                        export AWS_DEFAULT_REGION="$AWS_REGION"
 
-                    ACCOUNT_ID=$(aws sts get-caller-identity \
-                        --query Account \
-                        --output text)
+                        ACCOUNT_ID=$(aws sts get-caller-identity \
+                            --query Account \
+                            --output text)
+                        REGISTRY="$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
 
-                    aws ecr get-login-password \
-                        --region "$AWS_REGION" | \
-                        docker login \
-                        --username AWS \
-                        --password-stdin \
-                        "$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+                        aws ecr get-login-password --region "$AWS_REGION" | \
+                            docker login --username AWS --password-stdin "$REGISTRY"
 
-                    docker push "$FULL_IMAGE_URI"
+                        docker push "$IMAGE"
 
-                    docker tag "$FULL_IMAGE_URI" "$ECR_REPO_URI:latest"
-                    docker push "$ECR_REPO_URI:latest"
-                '''
+                        docker tag "$IMAGE" "$ECR_REPO_URI:latest"
+                        docker push "$ECR_REPO_URI:latest"
+
+                        docker logout "$REGISTRY"
+                    '''
+                }
             }
         }
 
         stage('8. Deploy to Amazon EKS') {
             steps {
-                sh '''
-                    set -e
+                withCredentials([usernamePassword(
+                    credentialsId: "${AWS_CRED_ID}",
+                    usernameVariable: 'AWS_ACCESS_KEY_ID',
+                    passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                )]) {
+                    sh '''
+                        set -e
+                        export AWS_DEFAULT_REGION="$AWS_REGION"
 
-                    aws eks update-kubeconfig \
-                        --region "$AWS_REGION" \
-                        --name "$EKS_CLUSTER_NAME"
+                        aws eks update-kubeconfig \
+                            --region "$AWS_REGION" \
+                            --name "$EKS_CLUSTER_NAME"
 
-                    sed -i "s|<AWS_ACCOUNT_ID>.dkr.ecr.<AWS_REGION>.amazonaws.com/seclock:latest|$FULL_IMAGE_URI|g" \
-                        k8s/deployment.yaml
+                        sed -i "s|376015725626.dkr.ecr.ap-south-1.amazonaws.com/seclock:latest|$IMAGE|g" \
+                            k8s/deployment.yaml
 
-                    kubectl create namespace "$K8S_NAMESPACE" \
-                        --dry-run=client \
-                        -o yaml | kubectl apply -f -
+                        # Fail if the placeholder wasn't replaced, otherwise the wrong image would be deployed
+                        grep -q "$IMAGE" k8s/deployment.yaml || {
+                            echo "Image placeholder not found in k8s/deployment.yaml"
+                            exit 1
+                        }
 
-                    kubectl apply -f k8s/serviceaccount.yaml \
-                        -n "$K8S_NAMESPACE"
+                        kubectl create namespace "$K8S_NAMESPACE" \
+                            --dry-run=client \
+                            -o yaml | kubectl apply -f -
 
-                    kubectl apply -f k8s/deployment.yaml \
-                        -n "$K8S_NAMESPACE"
+                        kubectl apply -f k8s/serviceaccount.yaml -n "$K8S_NAMESPACE"
+                        kubectl apply -f k8s/deployment.yaml -n "$K8S_NAMESPACE"
+                        kubectl apply -f k8s/service.yaml -n "$K8S_NAMESPACE"
 
-                    kubectl apply -f k8s/service.yaml \
-                        -n "$K8S_NAMESPACE"
-
-                    kubectl rollout status \
-                        deployment/seclock-deployment \
-                        -n "$K8S_NAMESPACE" \
-                        --timeout=120s
-                '''
+                        kubectl rollout status \
+                            deployment/seclock-deployment \
+                            -n "$K8S_NAMESPACE" \
+                            --timeout=120s
+                    '''
+                }
             }
         }
     }
