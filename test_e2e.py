@@ -78,6 +78,17 @@ def expired_vault(vault):
     return vault
 
 
+@pytest.fixture
+def claim_ready_vault(expired_vault):
+    """Expired vault with a verified death certificate, the precondition for claims."""
+    res = client.post(
+        "/api/ocr/verify-document", json={"document_text": DEATH_CERT_TEXT}
+    )
+    assert res.status_code == 200
+    assert res.json()["status"] == "VERIFIED"
+    return expired_vault
+
+
 def submit_share(nominee_name, share):
     return client.post(
         "/api/claim/submit-share",
@@ -172,25 +183,25 @@ def test_death_certificate_ocr_verification(expired_vault):
 # --------------------------------------------------------------------------
 # 6. Nominee share submission (3-of-5 threshold)
 # --------------------------------------------------------------------------
-def test_partial_shares_held_pending(expired_vault):
-    shares = expired_vault["shares"]
+def test_partial_shares_held_pending(claim_ready_vault):
+    shares = claim_ready_vault["shares"]
     for name, share in zip(NOMINEE_NAMES[:2], shares[:2]):
         res = submit_share(name, share)
         assert res.status_code == 200
         assert res.json()["is_reconstructed"] is False
 
 
-def test_threshold_reconstructs_and_decrypts_vault(expired_vault):
-    shares = expired_vault["shares"]
+def test_threshold_reconstructs_and_decrypts_vault(claim_ready_vault):
+    shares = claim_ready_vault["shares"]
     results = [
         submit_share(name, share).json()
         for name, share in zip(NOMINEE_NAMES, shares[:3])
     ]
 
     # First two shares are held pending, the third meets the threshold.
-    assert results[0]["is_reconstructed"] is False
-    assert results[1]["is_reconstructed"] is False
-    assert results[2]["is_reconstructed"] is True
+    assert results[0]["is_reconstructed"] is False, results[0]
+    assert results[1]["is_reconstructed"] is False, results[1]
+    assert results[2]["is_reconstructed"] is True, results[2]
 
     decrypted = results[2]["decrypted_vault"]
     assert decrypted is not None
