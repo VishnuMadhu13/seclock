@@ -74,7 +74,7 @@ pipeline {
         stage('5. Build Docker Image') {
             steps {
                 script {
-                    docker.build("${env.FULL_IMAGE_URI}", ".")
+                    docker build --pull -t ${IMAGE} .
                 }
             }
         }
